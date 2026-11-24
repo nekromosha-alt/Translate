@@ -2545,31 +2545,34 @@ requests>=2.31.0
 deep-translator>=1.11.4
 '''
 
+FILES["README.md"] = "\n".join([
+    "# Live Screen Translator (Windows 11, EN -> RU)",
+    "",
+    "Настольное приложение для Windows 11, выполняющее Live-перевод английского текста с выбранной области экрана на русский язык.",
+    "",
+    "## Запуск",
+    "1. pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu",
+    "2. pip install -r requirements.txt",
+    "3. python src/main.py",
+]) + "\n"
 
-FILES["README.md"] = r'''
-# Live Screen Translator (Windows 11, EN → RU)
 
-Настольное приложение для Windows 11, выполняющее Live-перевод английского текста с выбранной области экрана на русский язык с отрисовкой перевода прямо поверх оригинала.
+def main() -> int:
+    root = Path.cwd()
+    created: list[str] = []
 
-## Основные возможности
+    for rel_path, content in FILES.items():
+        target = root / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        normalized = content.lstrip("\n")
+        target.write_text(normalized, encoding="utf-8", newline="\n")
+        created.append(rel_path)
 
-- **In-Place Live Overlay без мерцания и самоперевода:** используется Win32 API `SetWindowDisplayAffinity(..., WDA_EXCLUDEFROMCAPTURE)`, благодаря чему русский оверлей полностью видим пользователю, кликабелен насквозь (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST`), но невидим для `mss`.
-- **Точное соответствие DPI (125% / 150% / Multi-Monitor):** активируется `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`, а координаты захвата `mss` считываются напрямую через Win32 `GetWindowRect`.
-- **Адаптивная типографика:** группировка близких строк в цельные абзацы, определение доминантного цвета фона по граничным пикселям, определение цвета оригинального текста и примерной жирности шрифта, автоподбор размера и переноса русского текста через `QFontMetrics`.
-- **Два движка перевода:**
-  - **LLM API (OpenAI-compatible):** OpenRouter, DeepSeek, локальные модели и др. с редактируемым системным промтом для живого литературного перевода без цензуры.
-  - **Free Online (`deep-translator`):** Google Translate / MyMemory (работает сразу без API-ключей) и DeepL Free API.
-- **Строгий режим выхода:** во время работы Live-перевода оверлей нельзя случайно закрыть кликом или `Esc` — выход осуществляется только по заданной горячей клавише остановки (по умолчанию `Ctrl+Shift+X`).
-- **Оптимизация CPU и API:** фоновый поток `QThread`, сравнение кадров через NumPy (пропуск OCR при изменении < 1.5%), потокобезопасный LRU-кэш переводов и хранение моделей EasyOCR в `%APPDATA%\LiveScreenTranslator\models`.
+    print("Проект Live Screen Translator успешно создан:")
+    for item in created:
+        print(f"  + {item}")
+    return 0
 
-## Локальный запуск (Windows 11, Python 3.11)
 
-```powershell
-# 1. Установка CPU-версии PyTorch
-pip install torch torchvision --index-url [https://download.pytorch.org/whl/cpu](https://download.pytorch.org/whl/cpu)
-
-# 2. Установка остальных зависимостей
-pip install -r requirements.txt
-
-# 3. Запуск приложения
-python src/main.py
+if __name__ == "__main__":
+    sys.exit(main())
