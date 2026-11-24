@@ -10,6 +10,9 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
 
     steps:
       - name: Checkout repository
@@ -41,25 +44,31 @@ jobs:
       - name: Build Windows executable with PyInstaller (--onedir)
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --noconsole `
-            --name "LiveScreenTranslator" `
-            --paths src `
-            --collect-all easyocr `
-            --collect-all skimage `
-            --collect-submodules deep_translator `
-            --hidden-import PyQt6.sip `
-            --hidden-import PIL.Image `
-            --hidden-import scipy.ndimage `
-            --hidden-import cv2 `
-            --hidden-import mss `
-            --hidden-import numpy `
-            --hidden-import requests `
-            --hidden-import bidi `
-            --hidden-import bidi.algorithm `
-            --hidden-import pyclipper `
-            --hidden-import shapely `
-            --hidden-import shapely.geometry `
-            src/main.py
+          $pyiArgs = @(
+            "--noconfirm",
+            "--clean",
+            "--onedir",
+            "--noconsole",
+            "--name", "LiveScreenTranslator",
+            "--paths", "src",
+            "--collect-all", "easyocr",
+            "--collect-all", "skimage",
+            "--collect-submodules", "deep_translator",
+            "--collect-submodules", "scipy.ndimage",
+            "--hidden-import", "PyQt6.sip",
+            "--hidden-import", "PIL.Image",
+            "--hidden-import", "cv2",
+            "--hidden-import", "mss",
+            "--hidden-import", "numpy",
+            "--hidden-import", "requests",
+            "--hidden-import", "bidi",
+            "--hidden-import", "bidi.algorithm",
+            "--hidden-import", "pyclipper",
+            "--hidden-import", "shapely",
+            "--hidden-import", "shapely.geometry",
+            "src/main.py"
+          )
+          & pyinstaller @pyiArgs
 
       - name: Package dist folder into ZIP archive
         shell: pwsh
