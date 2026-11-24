@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """
-Генератор проекта Live Screen Translator (Windows 11, PyQt6, Win32 API, EasyOCR).
-Запуск: python generate_project.py
-Создаёт полную структуру проекта в текущей директории.
+Generator for Live Screen Translator (Windows 11, PyQt6, Win32 API, EasyOCR).
+Run: python generate_project.py
 """
 
+import ast
 from pathlib import Path
 import sys
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 FILES: dict[str, str] = {}
@@ -99,7 +111,7 @@ _SPECIAL_VK: dict[str, int] = {
 class AppConfig:
     start_hotkey: str = "Ctrl+Shift+Q"
     stop_hotkey: str = "Ctrl+Shift+X"
-    engine: str = "free"  # "llm" или "free"
+    engine: str = "free"  # "llm" or "free"
     free_provider: str = "google"  # "google", "mymemory", "deepl"
     deepl_api_key: str = ""
     llm_base_url: str = "https://openrouter.ai/api/v1"
@@ -333,13 +345,11 @@ class TranslationEngine:
             except Exception as exc:
                 self._last_error = str(exc)
                 logger.warning("Translation failed: %s", exc)
-                # Если LLM упал (например, пустой ключ или сеть), возвращаем оригинал без падения
                 translated = list(uncached_texts)
 
             for idx, src_text, tr_text in zip(uncached_indices, uncached_texts, translated):
                 final_tr = (tr_text or src_text).strip()
                 results[idx] = final_tr
-                # Не кэшируем результат, если была ошибка сети/API
                 if not self._last_error and final_tr:
                     self._cache.put(f"{sig}::{src_text}", final_tr)
 
@@ -348,19 +358,24 @@ class TranslationEngine:
     def _translate_free_batch(self, cfg: AppConfig, texts: List[str]) -> List[str]:
         provider = cfg.free_provider
         if provider == "deepl" and cfg.deepl_api_key.strip():
-            translator = DeeplTranslator(
-                api_key=cfg.deepl_api_key.strip(),
-                source="en",
-                target="ru",
-                use_free_api=True,
-            )
-            return self._run_deep_translator(translator, texts)
+            try:
+                translator = DeeplTranslator(
+                    api_key=cfg.deepl_api_key.strip(),
+                    source="en",
+                    target="ru",
+                    use_free_api=True,
+                )
+                return self._run_deep_translator(translator, texts)
+            except Exception as exc:
+                logger.warning("DeepL failed, falling back to Google: %s", exc)
 
         if provider == "mymemory":
-            translator = MyMemoryTranslator(source="en-US", target="ru-RU")
-            return self._run_deep_translator(translator, texts)
+            try:
+                translator = MyMemoryTranslator(source="en-US", target="ru-RU")
+                return self._run_deep_translator(translator, texts)
+            except Exception as exc:
+                logger.warning("MyMemory failed, falling back to Google: %s", exc)
 
-        # Google Translate работает сразу без API-ключей (и служит fallback для пустого DeepL ключа)
         translator = GoogleTranslator(source="en", target="ru")
         return self._run_deep_translator(translator, texts)
 
@@ -368,9 +383,8 @@ class TranslationEngine:
     def _run_deep_translator(translator: object, texts: List[str]) -> List[str]:
         if len(texts) == 1:
             res = translator.translate(texts[0])  # type: ignore[attr-defined]
-            return [res if isinstance(res, str) and res.strip() else texts[0]]
+            return [res.strip() if isinstance(res, str) and res.strip() else texts[0]]
 
-        # Объединяем коротким разделителем или используем translate_batch
         try:
             batch_res = translator.translate_batch(texts)  # type: ignore[attr-defined]
             if isinstance(batch_res, list) and len(batch_res) == len(texts):
@@ -396,9 +410,9 @@ class TranslationEngine:
         model = cfg.llm_model.strip()
 
         if not base_url:
-            raise ValueError("Не указан Base URL для LLM API.")
+            raise ValueError("Base URL is empty.")
         if not model:
-            raise ValueError("Не указано имя модели (Model Name).")
+            raise ValueError("Model Name is empty.")
 
         endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
 
@@ -414,7 +428,6 @@ class TranslationEngine:
             translated_one = self._call_llm_single(endpoint, headers, cfg, texts[0])
             return [translated_one]
 
-        # Батч-запрос в JSON для сохранения контекста сцены и снижения числа запросов
         payload_items = [{"id": i, "text": t} for i, t in enumerate(texts)]
         batch_instruction = (
             f"{cfg.system_prompt}\n\n"
@@ -442,7 +455,6 @@ class TranslationEngine:
         if parsed is not None:
             return [parsed[i] if parsed[i] else texts[i] for i in range(len(texts))]
 
-        # Fallback: если модель нарушила JSON-схему, переводим поштучно
         return [self._call_llm_single(endpoint, headers, cfg, t) for t in texts]
 
     def _call_llm_single(
@@ -469,7 +481,7 @@ class TranslationEngine:
     def _extract_message_content(data: dict) -> str:
         choices = data.get("choices") or []
         if not choices:
-            raise ValueError("LLM API вернул пустой список choices.")
+            raise ValueError("LLM API returned empty choices.")
         message = choices[0].get("message") or {}
         content = message.get("content", "")
         if not isinstance(content, str):
@@ -501,7 +513,7 @@ class TranslationEngine:
                 except Exception:
                     continue
 
-        if len(mapped) == 0:
+        if not mapped:
             return None
 
         return [mapped.get(i, "") for i in range(expected_count)]
@@ -515,18 +527,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from pathlib import Path
 import re
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
+from PIL import Image as _PILImage
 
 from config import get_models_dir
 
 
+# Патч совместимости EasyOCR с Pillow >= 10 (удалённый атрибут Image.ANTIALIAS)
+if not hasattr(_PILImage, "ANTIALIAS") and hasattr(_PILImage, "Resampling"):
+    _PILImage.ANTIALIAS = _PILImage.Resampling.LANCZOS  # type: ignore[attr-defined]
+
 logger = logging.getLogger(__name__)
 
-# Основные веса EasyOCR для английского языка
 _EXPECTED_MODEL_FILES = ("craft_mlt_25k.pth", "english_g2.pth")
 _HYPHEN_BREAK_RE = re.compile(r"(\w+)-\s+(\w+)")
 
@@ -590,7 +605,6 @@ def compute_frame_diff_pct(prev_rgb: Optional[np.ndarray], curr_rgb: np.ndarray)
     if prev_rgb is None or prev_rgb.shape != curr_rgb.shape:
         return 100.0
 
-    # Для больших областей делаем шаг 2 для ускорения без потери точности
     h, w = curr_rgb.shape[:2]
     step = 2 if (h * w) > 300_000 else 1
     a = prev_rgb[::step, ::step].astype(np.int16)
@@ -602,7 +616,7 @@ def compute_frame_diff_pct(prev_rgb: Optional[np.ndarray], curr_rgb: np.ndarray)
 
 
 def _quantized_dominant_color(pixels: np.ndarray) -> Tuple[int, int, int]:
-    """Определяет доминантный RGB-цвет через квантование по корзинам (устойчив к артефактам)."""
+    """Определяет доминантный RGB-цвет через квантование по корзинам."""
     if pixels.size == 0:
         return (20, 20, 24)
     flat = pixels.reshape(-1, 3)
@@ -610,7 +624,6 @@ def _quantized_dominant_color(pixels: np.ndarray) -> Tuple[int, int, int]:
         med = np.median(flat, axis=0)
         return (int(med[0]), int(med[1]), int(med[2]))
 
-    # Квантование шагом 12 для объединения близких оттенков градиента/сглаживания
     quant = (flat // 12).astype(np.int32)
     keys = quant[:, 0] * 10000 + quant[:, 1] * 100 + quant[:, 2]
     unique_keys, counts = np.unique(keys, return_counts=True)
@@ -649,7 +662,6 @@ def _extract_border_bg_color(img_rgb: np.ndarray, x1: int, y1: int, x2: int, y2:
         if border_pixels.shape[0] > 0:
             return _quantized_dominant_color(border_pixels)
 
-    # Fallback: углы внутри самого бокса
     crop = img_rgb[iy1:iy2, ix1:ix2]
     if crop.size == 0:
         return (20, 20, 24)
@@ -695,7 +707,6 @@ def _analyze_fg_and_weight(
         fg = (245, 245, 245) if _perceived_luminance(bg_color) < 128 else (20, 20, 24)
         return (fg, 400)
 
-    # Берём наиболее контрастные пиксели для точного определения цвета глифов
     high_thresh = max(35.0, float(np.percentile(dists, 82)))
     fg_pixels = flat[dists >= high_thresh]
     if fg_pixels.shape[0] == 0:
@@ -704,22 +715,20 @@ def _analyze_fg_and_weight(
     med_fg = np.median(fg_pixels, axis=0)
     fg_color = (int(med_fg[0]), int(med_fg[1]), int(med_fg[2]))
 
-    # Гарантируем читаемый контраст между текстом и заливкой
     bg_lum = _perceived_luminance(bg_color)
     fg_lum = _perceived_luminance(fg_color)
     if abs(bg_lum - fg_lum) < 70.0:
         fg_color = (245, 245, 245) if bg_lum < 128.0 else (20, 20, 24)
 
-    # Оценка жирности по плотности штрихов (доля пикселей заметно отличных от фона)
     stroke_thresh = max(32.0, max_dist * 0.42)
     density = float(np.count_nonzero(dists >= stroke_thresh)) / float(dists.size)
 
     if density >= 0.30:
-        font_weight = 700  # Bold
+        font_weight = 700
     elif density >= 0.22:
-        font_weight = 600  # DemiBold
+        font_weight = 600
     else:
-        font_weight = 400  # Normal
+        font_weight = 400
 
     return (fg_color, font_weight)
 
@@ -748,7 +757,7 @@ class OCREngine:
                     "Первый запуск: загрузка моделей EasyOCR (~100 МБ) в AppData... Подождите 1–2 мин."
                 )
 
-        import easyocr  # Отложенный импорт ускоряет старт UI
+        import easyocr
 
         self._reader = easyocr.Reader(
             ["en"],
@@ -822,7 +831,6 @@ class OCREngine:
         lines: List[_TextLine] = []
         for cluster in clusters:
             cluster.sort(key=lambda item: item.x1)
-            # Разделяем строку, если между словами слишком широкий горизонтальный разрыв (колонки)
             sub_groups: List[List[_RawWord]] = [[cluster[0]]]
             for item in cluster[1:]:
                 prev = sub_groups[-1][-1]
@@ -868,7 +876,9 @@ class OCREngine:
             for group in para_groups:
                 last = group[-1]
                 avg_h = (last.line_height + line.line_height) * 0.5
-                h_ratio = max(last.line_height, line.line_height) / max(1.0, min(last.line_height, line.line_height))
+                h_ratio = max(last.line_height, line.line_height) / max(
+                    1.0, min(last.line_height, line.line_height)
+                )
                 if h_ratio > 1.38:
                     continue
 
@@ -887,7 +897,6 @@ class OCREngine:
                 if horiz_overlap <= 0 and not left_close and not center_close:
                     continue
 
-                # Не сливаем элементы на кардинально разных цветных плашках (например, разные кнопки UI)
                 if _color_distance(last.bg_color, line.bg_color) > 60.0:
                     continue
 
@@ -1076,7 +1085,6 @@ class RegionSelector(QWidget):
         if sel is None or sel.isEmpty():
             painter.fillRect(full_rect, dim_color)
         else:
-            # Затемняем 4 зоны вокруг выделения, чтобы выбранный текст оставался чётким
             painter.fillRect(QRect(0, 0, full_rect.width(), sel.top()), dim_color)
             painter.fillRect(
                 QRect(0, sel.bottom() + 1, full_rect.width(), full_rect.height() - sel.bottom() - 1),
@@ -1087,14 +1095,14 @@ class RegionSelector(QWidget):
                 QRect(sel.right() + 1, sel.top(), full_rect.width() - sel.right() - 1, sel.height()),
                 dim_color,
             )
+            # Невидимая заливка alpha=1 удерживает перехват мыши внутри выделения
+            painter.fillRect(sel, QColor(0, 0, 0, 1))
 
-            # Рамка выделенной области
             pen = QPen(QColor("#818CF8"), 2)
             painter.setPen(pen)
             painter.drawRect(sel)
 
-            # Плашка с размерами
-            badge_text = f"{sel.width()} × {sel.height()}"
+            badge_text = f"{sel.width()} x {sel.height()}"
             badge_font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
             painter.setFont(badge_font)
             fm = painter.fontMetrics()
@@ -1111,13 +1119,12 @@ class RegionSelector(QWidget):
             painter.setPen(QColor("#E2E8F0"))
             painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
 
-        # Подсказка в верхней части основного монитора
         primary = QGuiApplication.primaryScreen()
         p_geo = primary.geometry() if primary else self._virtual_geo
         local_top_center_x = (p_geo.left() - self._virtual_geo.left()) + p_geo.width() // 2
         local_top_y = (p_geo.top() - self._virtual_geo.top()) + 28
 
-        hint = "Выделите область мышкой для Live-перевода  •  ПКМ / Esc — отмена"
+        hint = "Выделите область мышкой для Live-перевода  |  ПКМ / Esc — отмена"
         hint_font = QFont("Segoe UI", 10, QFont.Weight.DemiBold)
         painter.setFont(hint_font)
         hfm = painter.fontMetrics()
@@ -1142,7 +1149,7 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 import logging
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from PyQt6.QtCore import QRect, Qt, QTimer
 from PyQt6.QtGui import QCloseEvent, QColor, QFont, QFontMetrics, QKeyEvent, QPainter, QPaintEvent, QPen
@@ -1164,6 +1171,7 @@ WDA_EXCLUDEFROMCAPTURE = 0x00000011
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 SWP_SHOWWINDOW = 0x0040
 HWND_TOPMOST = ctypes.c_void_p(-1)
 
@@ -1228,7 +1236,7 @@ class OverlayWindow(QWidget):
     Окно наложения перевода поверх оригинального текста.
     - Без рамки, прозрачное, всегда поверх окон (включая borderless игры).
     - Полностью кликабельно насквозь.
-    - Исключено из захвата экрана (WDA_EXCLUDEFROMCAPTURE), поэтому mss видит только оригинал.
+    - Исключено из захвата экрана (WDA_EXCLUDEFROMCAPTURE).
     - Закрывается ТОЛЬКО программно через force_close() (по глобальному хоткею остановки).
     """
 
@@ -1252,7 +1260,6 @@ class OverlayWindow(QWidget):
         self._allow_close = False
         self._affinity_applied = False
 
-        # Периодически подтверждаем TOPMOST без перехвата фокуса (актуально для borderless-игр)
         self._topmost_timer = QTimer(self)
         self._topmost_timer.setInterval(2000)
         self._topmost_timer.timeout.connect(self._assert_topmost)
@@ -1290,13 +1297,21 @@ class OverlayWindow(QWidget):
         )
         _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
 
-        # КРИТИЧЕСКИ ВАЖНО: делаем оверлей невидимым для mss (защита от самоперевода и мерцания)
+        # Защита от самоперевода и мерцания: оверлей невидим для mss
         ok = _user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
         self._affinity_applied = bool(ok)
         if not ok:
             logger.error("SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) failed for hwnd=%s", hwnd)
 
-        self._assert_topmost()
+        _user32.SetWindowPos(
+            ctypes.c_void_p(hwnd),
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        )
 
     def _assert_topmost(self) -> None:
         if not self.isVisible():
@@ -1344,14 +1359,12 @@ class OverlayWindow(QWidget):
         self.hide()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        # Блокируем случайное закрытие (Alt+F4 и системные сигналы), пока не вызван force_close()
         if not self._allow_close:
             event.ignore()
             return
         event.accept()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        # Игнорируем Esc и любые клавиши — выход только по глобальному хоткею остановки
         event.ignore()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -1364,7 +1377,6 @@ class OverlayWindow(QWidget):
         if w_log <= 0 or h_log <= 0:
             return
 
-        # Едва заметные угловые метки активной области (невидимы для mss из-за WDA_EXCLUDEFROMCAPTURE)
         self._draw_corner_markers(painter, w_log, h_log)
 
         if not self._blocks:
@@ -1381,16 +1393,12 @@ class OverlayWindow(QWidget):
         arm = min(14, max(6, min(w, h) // 10))
         pen = QPen(QColor(129, 140, 248, 150), 2)
         painter.setPen(pen)
-        # Левый верхний
         painter.drawLine(1, 1, arm, 1)
         painter.drawLine(1, 1, 1, arm)
-        # Правый верхний
         painter.drawLine(w - arm - 1, 1, w - 2, 1)
         painter.drawLine(w - 2, 1, w - 2, arm)
-        # Левый нижний
         painter.drawLine(1, h - 2, arm, h - 2)
         painter.drawLine(1, h - arm - 1, 1, h - 2)
-        # Правый нижний
         painter.drawLine(w - arm - 1, h - 2, w - 2, h - 2)
         painter.drawLine(w - 2, h - arm - 1, w - 2, h - 2)
 
@@ -1407,7 +1415,6 @@ class OverlayWindow(QWidget):
         if not text:
             return
 
-        # Перевод координат из физических пикселей захвата в логические пиксели Qt-окна
         pad_x = 3
         pad_y = 2
         rx = max(0, int(round(blk.x1 * sx)) - pad_x)
@@ -1420,7 +1427,6 @@ class OverlayWindow(QWidget):
         text_pad_x = 4
         text_pad_y = 2
 
-        # Стартовый размер шрифта пропорционально высоте строки оригинала
         logical_line_h = max(10.0, blk.line_height * sy)
         start_px = max(9, min(68, int(round(logical_line_h * 0.86))))
         min_px = 8
@@ -1448,7 +1454,6 @@ class OverlayWindow(QWidget):
                 chosen_px = px
                 break
         else:
-            # Если русский текст длиннее бокса даже на минимальном шрифте, аккуратно расширяем плашку
             font.setPixelSize(min_px)
             fm = QFontMetrics(font)
             if measured.width() > avail_w:
@@ -1466,14 +1471,12 @@ class OverlayWindow(QWidget):
         font.setPixelSize(chosen_px)
         bg_rect = QRect(rx, ry, rw, rh)
 
-        # Закрашиваем английский оригинал скруглённым прямоугольником доминантного цвета фона
         radius = min(6.0, rh * 0.22)
         bg_qcolor = QColor(blk.bg_color[0], blk.bg_color[1], blk.bg_color[2], 248)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg_qcolor)
         painter.drawRoundedRect(bg_rect, radius, radius)
 
-        # Рисуем русский перевод цветом оригинала
         text_rect = bg_rect.adjusted(text_pad_x, text_pad_y, -text_pad_x, -text_pad_y)
         fg_qcolor = QColor(blk.fg_color[0], blk.fg_color[1], blk.fg_color[2], 255)
         painter.setFont(font)
@@ -1533,7 +1536,7 @@ QScrollArea {
     border: none;
     background-color: #0F1117;
 }
-QFrame.Card {
+QFrame[card="true"] {
     background-color: #171B26;
     border: 1px solid #252B3B;
     border-radius: 10px;
@@ -1547,12 +1550,12 @@ QLabel#SubtitleLabel {
     font-size: 12px;
     color: #94A3B8;
 }
-QLabel.SectionTitle {
+QLabel[role="section"] {
     font-size: 13px;
     font-weight: 700;
     color: #C7D2FE;
 }
-QLabel.MutedHint {
+QLabel[role="hint"] {
     font-size: 11px;
     color: #94A3B8;
 }
@@ -1680,17 +1683,18 @@ class HotkeyEdit(QLineEdit):
         self.setToolTip("Кликните в поле и нажмите желаемую комбинацию (например, Ctrl+Shift+Q)")
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        key = event.key()
-        if key in (
-            Qt.Key.Key_Control,
-            Qt.Key.Key_Shift,
-            Qt.Key.Key_Alt,
-            Qt.Key.Key_Meta,
-            Qt.Key.Key_unknown,
-        ):
+        key = int(event.key())
+        ignored = {
+            int(Qt.Key.Key_Control.value),
+            int(Qt.Key.Key_Shift.value),
+            int(Qt.Key.Key_Alt.value),
+            int(Qt.Key.Key_Meta.value),
+            int(Qt.Key.Key_unknown.value),
+        }
+        if key in ignored:
             return
 
-        if key == Qt.Key.Key_Escape:
+        if key == int(Qt.Key.Key_Escape.value):
             self.clearFocus()
             return
 
@@ -1716,13 +1720,23 @@ class HotkeyEdit(QLineEdit):
 
     @staticmethod
     def _qt_key_to_name(key: int) -> Optional[str]:
-        if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
-            return chr(ord("A") + (key - Qt.Key.Key_A))
-        if Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
-            return chr(ord("0") + (key - Qt.Key.Key_0))
-        if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F24:
-            return f"F{key - Qt.Key.Key_F1 + 1}"
-        return _QT_KEY_NAMES.get(Qt.Key(key))
+        key_a = int(Qt.Key.Key_A.value)
+        key_z = int(Qt.Key.Key_Z.value)
+        key_0 = int(Qt.Key.Key_0.value)
+        key_9 = int(Qt.Key.Key_9.value)
+        key_f1 = int(Qt.Key.Key_F1.value)
+        key_f24 = int(Qt.Key.Key_F24.value)
+
+        if key_a <= key <= key_z:
+            return chr(ord("A") + (key - key_a))
+        if key_0 <= key <= key_9:
+            return chr(ord("0") + (key - key_0))
+        if key_f1 <= key <= key_f24:
+            return f"F{key - key_f1 + 1}"
+        try:
+            return _QT_KEY_NAMES.get(Qt.Key(key))
+        except ValueError:
+            return None
 
 
 class MainWindow(QMainWindow):
@@ -1736,7 +1750,7 @@ class MainWindow(QMainWindow):
         self._config = config
         self._ocr_ready = False
 
-        self.setWindowTitle("Live Screen Translator (EN → RU)")
+        self.setWindowTitle("Live Screen Translator (EN -> RU)")
         self.setMinimumSize(510, 620)
         self.resize(540, 690)
         self.setStyleSheet(DARK_QSS)
@@ -1751,22 +1765,20 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(16, 14, 16, 14)
         root_layout.setSpacing(10)
 
-        # Заголовок
         header_row = QHBoxLayout()
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
         title_lbl = QLabel("Live Screen Translator")
         title_lbl.setObjectName("TitleLabel")
-        sub_lbl = QLabel("Мгновенный перевод EN → RU поверх оригинального текста (Windows 11)")
+        sub_lbl = QLabel("Мгновенный перевод EN -> RU поверх оригинального текста (Windows 11)")
         sub_lbl.setObjectName("SubtitleLabel")
         title_col.addWidget(title_lbl)
         title_col.addWidget(sub_lbl)
         header_row.addLayout(title_col)
         root_layout.addLayout(header_row)
 
-        # Баннер статуса OCR / загрузки моделей
         status_card = QFrame()
-        status_card.setProperty("class", "Card")
+        status_card.setProperty("card", "true")
         status_layout = QVBoxLayout(status_card)
         status_layout.setContentsMargins(12, 10, 12, 10)
         status_layout.setSpacing(6)
@@ -1776,14 +1788,13 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #FBBF24; font-weight: 600; font-size: 12px;")
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)  # Неопределённый индикатор во время загрузки моделей
+        self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
 
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.progress_bar)
         root_layout.addWidget(status_card)
 
-        # Прокручиваемая область настроек
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll_content = QWidget()
@@ -1794,13 +1805,13 @@ class MainWindow(QMainWindow):
 
         # Карточка 1: Горячие клавиши и интервал
         hk_card = QFrame()
-        hk_card.setProperty("class", "Card")
+        hk_card.setProperty("card", "true")
         hk_layout = QVBoxLayout(hk_card)
         hk_layout.setContentsMargins(12, 10, 12, 12)
         hk_layout.setSpacing(8)
 
         hk_title = QLabel("Управление и Live-режим")
-        hk_title.setProperty("class", "SectionTitle")
+        hk_title.setProperty("role", "section")
         hk_layout.addWidget(hk_title)
 
         hk_form = QFormLayout()
@@ -1831,20 +1842,20 @@ class MainWindow(QMainWindow):
         strict_hint = QLabel(
             "Важно: Live-режим не закрывается по Esc или клику — выход только по комбинации остановки."
         )
-        strict_hint.setProperty("class", "MutedHint")
+        strict_hint.setProperty("role", "hint")
         strict_hint.setWordWrap(True)
         hk_layout.addWidget(strict_hint)
         content_layout.addWidget(hk_card)
 
         # Карточка 2: Движок перевода
         eng_card = QFrame()
-        eng_card.setProperty("class", "Card")
+        eng_card.setProperty("card", "true")
         eng_layout = QVBoxLayout(eng_card)
         eng_layout.setContentsMargins(12, 10, 12, 12)
         eng_layout.setSpacing(10)
 
         eng_title = QLabel("Движок перевода")
-        eng_title.setProperty("class", "SectionTitle")
+        eng_title.setProperty("role", "section")
         eng_layout.addWidget(eng_title)
 
         radio_row = QHBoxLayout()
@@ -1890,7 +1901,7 @@ class MainWindow(QMainWindow):
 
         prompt_header = QHBoxLayout()
         prompt_lbl = QLabel("System Prompt (литературный перевод без цензуры):")
-        prompt_lbl.setProperty("class", "MutedHint")
+        prompt_lbl.setProperty("role", "hint")
         reset_prompt_btn = QPushButton("Сбросить промт")
         reset_prompt_btn.setObjectName("SmallBtn")
         reset_prompt_btn.clicked.connect(lambda: self.prompt_edit.setPlainText(DEFAULT_SYSTEM_PROMPT))
@@ -1930,7 +1941,7 @@ class MainWindow(QMainWindow):
             "Google Translate через deep-translator работает сразу из коробки без регистрации и ключей. "
             "Для максимально живого и художественного перевода выберите LLM API."
         )
-        free_hint.setProperty("class", "MutedHint")
+        free_hint.setProperty("role", "hint")
         free_hint.setWordWrap(True)
         free_layout.addWidget(free_hint)
         free_layout.addStretch()
@@ -1944,9 +1955,8 @@ class MainWindow(QMainWindow):
         scroll.setWidget(scroll_content)
         root_layout.addWidget(scroll, 1)
 
-        # Нижняя панель кнопок
         self.feedback_label = QLabel("")
-        self.feedback_label.setProperty("class", "MutedHint")
+        self.feedback_label.setProperty("role", "hint")
         self.feedback_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root_layout.addWidget(self.feedback_label)
 
@@ -2076,7 +2086,6 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import logging
-import os
 from pathlib import Path
 import sys
 import threading
@@ -2084,7 +2093,6 @@ import time
 from typing import List, Optional, Tuple
 
 
-# Гарантируем доступность модулей из src при любом способе запуска
 _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
@@ -2107,8 +2115,19 @@ class _SafeLogStream:
 
 if sys.stdout is None:
     sys.stdout = _SafeLogStream()  # type: ignore[assignment]
+elif hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 if sys.stderr is None:
     sys.stderr = _SafeLogStream()  # type: ignore[assignment]
+elif hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
 # 1. Включаем Per-Monitor DPI Awareness V2 строго ДО создания QApplication
@@ -2118,7 +2137,7 @@ enable_dpi_awareness()
 
 import mss
 import numpy as np
-from PyQt6.QtCore import QAbstractNativeEventFilter, QObject, QRect, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QAbstractNativeEventFilter, QObject, QRect, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 from config import AppConfig, get_app_dir, load_config, parse_hotkey_win32, save_config
@@ -2128,7 +2147,6 @@ from translator import TranslationEngine
 from ui_window import MainWindow
 
 
-# Win32 Hotkey API
 WM_HOTKEY = 0x0312
 HOTKEY_ID_START = 1001
 HOTKEY_ID_STOP = 1002
@@ -2161,16 +2179,21 @@ class WinHotkeyFilter(QAbstractNativeEventFilter):
         self._on_stop = on_stop
 
     def nativeEventFilter(self, eventType, message):  # type: ignore[override]
-        if eventType in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+        try:
+            ev = bytes(eventType)
+        except Exception:
+            ev = b""
+
+        if ev in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
             try:
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == WM_HOTKEY:
                     hk_id = int(msg.wParam)
                     if hk_id == HOTKEY_ID_START:
-                        self._on_start()
+                        QTimer.singleShot(0, self._on_start)
                         return True, 0
                     if hk_id == HOTKEY_ID_STOP:
-                        self._on_stop()
+                        QTimer.singleShot(0, self._on_stop)
                         return True, 0
             except Exception as exc:
                 logger.debug("nativeEventFilter error: %s", exc)
@@ -2229,7 +2252,6 @@ class LiveWorker(QThread):
         prev_rgb: Optional[np.ndarray] = None
         last_rendered_signature: Optional[Tuple[Tuple[str, int, int], ...]] = None
 
-        # Небольшая пауза, чтобы DWM успел применить WDA_EXCLUDEFROMCAPTURE к окну оверлея
         if self._sleep_interruptible(0.08):
             return
 
@@ -2240,7 +2262,6 @@ class LiveWorker(QThread):
 
                     try:
                         shot = sct.grab(monitor)
-                        # BGRA -> contiguous RGB
                         img_rgb = np.ascontiguousarray(np.asarray(shot)[:, :, 2::-1])
                     except Exception as exc:
                         logger.warning("Screen grab failed: %s", exc)
@@ -2277,7 +2298,6 @@ class LiveWorker(QThread):
                             self.blocks_ready.emit([], width, height)
                     else:
                         sig = tuple((b.text, b.x1 // 4, b.y1 // 4) for b in blocks)
-                        # Даже если фон двигался, перевод и LRU-кэш не сделают лишних API-вызовов
                         texts = [b.text for b in blocks]
                         translated_texts = self._translator.translate_batch(texts)
 
@@ -2310,7 +2330,6 @@ class LiveWorker(QThread):
             self.worker_error.emit(str(exc))
 
     def _sleep_interruptible(self, seconds: float) -> bool:
-        """Спит указанное время с быстрой реакцией на stop_event. Возвращает True при остановке."""
         deadline = time.monotonic() + seconds
         while not self._stop_event.is_set():
             remaining = deadline - time.monotonic()
@@ -2338,6 +2357,7 @@ class AppController(QObject):
         self._ocr_init_thread: Optional[OCRInitThread] = None
         self._live_active = False
         self._selecting = False
+        self._is_shutdown = False
         self._registered_hwnd: int = 0
 
         self._hotkey_filter = WinHotkeyFilter(
@@ -2365,7 +2385,7 @@ class AppController(QObject):
         )
         self._ocr_init_thread.finished_ok.connect(
             lambda: self._main_window.set_ocr_status(
-                f"EasyOCR готов к работе  •  Старт: {self._config.start_hotkey}  •  Стоп: {self._config.stop_hotkey}",
+                f"EasyOCR готов к работе  |  Старт: {self._config.start_hotkey}  |  Стоп: {self._config.stop_hotkey}",
                 ready=True,
             )
         )
@@ -2378,6 +2398,7 @@ class AppController(QObject):
         if self._registered_hwnd:
             _user32.UnregisterHotKey(self._registered_hwnd, HOTKEY_ID_START)
             _user32.UnregisterHotKey(self._registered_hwnd, HOTKEY_ID_STOP)
+            self._registered_hwnd = 0
 
     def _register_hotkeys(self) -> None:
         self._unregister_hotkeys()
@@ -2416,12 +2437,11 @@ class AppController(QObject):
         self._register_hotkeys()
         if self._ocr.is_ready:
             self._main_window.set_ocr_status(
-                f"EasyOCR готов к работе  •  Старт: {self._config.start_hotkey}  •  Стоп: {self._config.stop_hotkey}",
+                f"EasyOCR готов к работе  |  Старт: {self._config.start_hotkey}  |  Стоп: {self._config.stop_hotkey}",
                 ready=True,
             )
 
     def trigger_start_selection(self) -> None:
-        """Запускается по глобальному хоткею старта или кнопке в стартовом окне."""
         if not self._ocr.is_ready:
             self._main_window.show()
             self._main_window.raise_()
@@ -2432,7 +2452,6 @@ class AppController(QObject):
         if self._selecting:
             return
 
-        # Если Live-режим уже запущен — аккуратно останавливаем перед выбором новой области
         if self._live_active:
             self._stop_worker_and_overlay()
 
@@ -2448,7 +2467,6 @@ class AppController(QObject):
         self._selecting = False
         self._main_window.hide()
 
-        # Показываем оверлей и считываем его точный физический прямоугольник для 1:1 совпадения с mss
         phys_rect = self._overlay.start_at(logical_rect)
         if phys_rect[2] < 16 or phys_rect[3] < 16:
             phys_rect = fallback_phys_rect
@@ -2477,7 +2495,6 @@ class AppController(QObject):
         self._overlay.force_close()
 
     def stop_live_mode(self) -> None:
-        """Единственная точка выхода из Live-режима (по глобальному хоткею остановки)."""
         if self._selecting:
             self._selecting = False
             self._selector.hide()
@@ -2485,7 +2502,6 @@ class AppController(QObject):
             return
 
         if not self._live_active:
-            # Если Live-режим не активен, просто выводим стартовое окно на передний план
             self._show_main_window()
             return
 
@@ -2498,6 +2514,9 @@ class AppController(QObject):
         self._main_window.activateWindow()
 
     def shutdown(self) -> None:
+        if self._is_shutdown:
+            return
+        self._is_shutdown = True
         self._stop_worker_and_overlay()
         self._unregister_hotkeys()
         if self._ocr_init_thread is not None and self._ocr_init_thread.isRunning():
@@ -2511,12 +2530,10 @@ def main() -> int:
     )
     app = QApplication(sys.argv)
     app.setApplicationName("LiveScreenTranslator")
-    # Не завершаем приложение автоматически при скрытии стартового окна во время Live-режима
     app.setQuitOnLastWindowClosed(False)
 
     controller = AppController(app)
 
-    # Закрытие стартового окна крестиком завершает всё приложение
     original_close = controller._main_window.closeEvent
 
     def _on_main_close(event) -> None:
@@ -2545,12 +2562,21 @@ requests>=2.31.0
 deep-translator>=1.11.4
 '''
 
+
 FILES["README.md"] = "\n".join([
     "# Live Screen Translator (Windows 11, EN -> RU)",
     "",
-    "Настольное приложение для Windows 11, выполняющее Live-перевод английского текста с выбранной области экрана на русский язык.",
+    "Настольное приложение для Windows 11, выполняющее Live-перевод английского текста",
+    "с выбранной области экрана на русский язык прямо поверх оригинала.",
     "",
-    "## Запуск",
+    "## Основные функции",
+    "- Прозрачный кликабельный оверлей с защитой от самоперевода (WDA_EXCLUDEFROMCAPTURE).",
+    "- Поддержка Per-Monitor DPI V2 (масштабирование Windows 125% / 150%).",
+    "- Два движка перевода: LLM API (OpenRouter/DeepSeek) и Free Online (Google/MyMemory/DeepL).",
+    "- Строгий выход из Live-режима только по заданному хоткею (по умолчанию Ctrl+Shift+X).",
+    "- Модели EasyOCR хранятся в %APPDATA%\\LiveScreenTranslator\\models.",
+    "",
+    "## Локальный запуск (Python 3.11)",
     "1. pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu",
     "2. pip install -r requirements.txt",
     "3. python src/main.py",
@@ -2565,10 +2591,12 @@ def main() -> int:
         target = root / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         normalized = content.lstrip("\n")
+        if rel_path.endswith(".py"):
+            ast.parse(normalized, filename=rel_path)
         target.write_text(normalized, encoding="utf-8", newline="\n")
         created.append(rel_path)
 
-    print("Проект Live Screen Translator успешно создан:")
+    print("Live Screen Translator project generated successfully:")
     for item in created:
         print(f"  + {item}")
     return 0
