@@ -36,10 +36,11 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Verify Python syntax of generated modules
+      - name: Verify Python syntax and torchvision::nms
         shell: pwsh
         run: |
           python -m py_compile src/config.py src/translator.py src/ocr_engine.py src/selector.py src/overlay.py src/ui_window.py src/main.py
+          python -c "import torch, torchvision, easyocr; print('Torch:', torch.__version__, 'Torchvision:', torchvision.__version__); assert hasattr(torch.ops.torchvision, 'nms'); print('torchvision::nms OK')"
 
       - name: Build Windows executable with PyInstaller (--onedir)
         shell: pwsh
@@ -51,6 +52,10 @@ jobs:
             "--noconsole",
             "--name", "LiveScreenTranslator",
             "--paths", "src",
+            "--collect-all", "torchvision",
+            "--collect-binaries", "torch",
+            "--copy-metadata", "torch",
+            "--copy-metadata", "torchvision",
             "--collect-all", "easyocr",
             "--collect-all", "skimage",
             "--collect-submodules", "deep_translator",
@@ -69,6 +74,15 @@ jobs:
             "src/main.py"
           )
           & pyinstaller @pyiArgs
+
+      - name: Verify torchvision native extension inside dist
+        shell: pwsh
+        run: |
+          $tvBin = Get-ChildItem -Path dist/LiveScreenTranslator -Recurse -Filter "_C*.pyd" | Where-Object { $_.FullName -match "torchvision" }
+          if (-not $tvBin) {
+            throw "torchvision _C.pyd was not bundled by PyInstaller!"
+          }
+          Write-Host "Bundled torchvision binary: $($tvBin.FullName)"
 
       - name: Package dist folder into ZIP archive
         shell: pwsh
